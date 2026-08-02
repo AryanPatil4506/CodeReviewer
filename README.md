@@ -13,8 +13,10 @@ Fully containerized with Docker, with observability via LangSmith and persistent
 - **Persistent memory** — ChromaDB stores review history so the system can reference prior findings across sessions
 - **Streaming API** — FastAPI backend with `StreamingResponse` for real-time, per-file review output
 - **MCP server** — `review_pr` and `check_cross_file_taint` exposed as MCP tools, so the reviewer can be called directly from any MCP client (Claude Desktop, IDEs, other agents), with bounded concurrency and partial-failure tolerance for multi-file runs
+- **Bounded, provider-aware concurrency** — a call-level semaphore wraps every LLM invocation, capping concurrent requests only when running against local Ollama (a real hardware/VRAM limit); Groq/OpenAI/OpenRouter calls bypass the semaphore and rely on their own rate-limit retry/backoff instead, since their actual constraint is requests-per-minute, not concurrency
+- **Token-optimized output formatting** — diff-assembly uses a windowed view of findings (padded, merged line ranges) rather than full file content, reducing prompt size for the final review output
 - **Fully containerized** — Docker Compose setup with GPU passthrough, healthcheck-gated startup, and non-root privilege dropping; the MCP server runs as its own containerized service sharing the same Ollama instance and Chroma memory store as the main app
-- **Multi-provider LLM support** — works with local models via Ollama (Llama, Qwen, Gemma, and others) or hosted providers (OpenAI, Groq)
+- **Multi-provider LLM support** — works with local models via Ollama (Llama, Qwen, Gemma, and others) or hosted providers (OpenAI, Groq, OpenRouter)
 
 ## Architecture
 
@@ -59,7 +61,7 @@ This same graph is what the MCP server's `review_pr` and `check_cross_file_taint
 | Layer | Tools |
 |---|---|
 | Agent orchestration | LangGraph |
-| LLM inference | Ollama (local), OpenAI, Groq |
+| LLM inference | Ollama (local), OpenAI, Groq, OpenRouter |
 | Vector memory | ChromaDB |
 | API | FastAPI |
 | Agent tooling | MCP (Model Context Protocol) — FastMCP |
@@ -128,6 +130,51 @@ the repo tree during taint tracing. If you hit a rate limit anyway, Code Reviewe
 retries automatically with backoff (reading the `retry-after` header) and returns a
 `503` only if retries are exhausted — no action needed on your end beyond waiting.
 
+## Concurrency Configuration
+
+Code Reviewer bounds how many LLM calls and file-level graph runs can execute
+concurrently, configurable via two environment variables:
+
+| Variable | Default | What it bounds |
+|---|---|---|
+| `LLM_SEMAPHORE` | `3` | Concurrent LLM calls — **only enforced when `LLM_PROVIDER=ollama`** |
+| `FILE_SEMAPHORE` | `5` | Concurrent files being reviewed at once, per `/review` request |
+
+### Why two separate limits
+
+`LLM_SEMAPHORE` protects your GPU: Ollama runs on a single local GPU with
+fixed VRAM, so uncontrolled concurrent requests can queue up unpredictably or
+exhaust available memory. This limit wraps the actual LLM call site, so it
+correctly bounds concurrency across every node in the graph — including the
+specialist agents (bug/security/quality/performance) that fan out
+concurrently within a single file's review.
+
+For hosted providers (OpenAI, Groq, OpenRouter), `LLM_SEMAPHORE` is not
+applied — their real constraint is a rate-over-time limit (requests/tokens
+per minute), which a concurrency cap doesn't solve. Rate-limit handling for
+these providers is instead done via automatic retry with backoff, reading the
+`retry-after` header when present.
+
+`FILE_SEMAPHORE` bounds how many files' worth of graph execution (diff
+parsing, AST parsing, memory reads, taint tracing) run in parallel per
+review request. This is a lighter-weight, general safeguard — not tied to a
+specific hardware constraint — useful mainly for very large PRs.
+
+### Tuning `LLM_SEMAPHORE`
+
+If you're running Ollama locally, set this based on your GPU's VRAM and the
+model size in use — start conservative (2–3) and increase only if you've
+confirmed via `nvidia-smi` (or Task Manager on Windows) that VRAM usage stays
+well within budget at higher values. Too high a value risks OOM or degraded
+performance under concurrent requests; too low unnecessarily serializes work
+that your hardware could otherwise handle in parallel.
+
+```dotenv
+# In .env
+LLM_SEMAPHORE=3
+FILE_SEMAPHORE=5
+```
+
 ## Getting Started
 
 ### Prerequisites
@@ -143,7 +190,7 @@ cd CodeReviewer
 cp .env.example .env
 ```
 
-2. Fill in `.env` with your LangSmith API key, `GITHUB_TOKEN`, and choose your `LLM_PROVIDER` (`ollama`, `openai`, or `groq`).
+2. Fill in `.env` with your LangSmith API key, `GITHUB_TOKEN`, and choose your `LLM_PROVIDER` (`ollama`, `openai`, `groq`, or `openrouter`).
 3. Build and run:
 ```bash
 docker compose up --build
@@ -151,6 +198,24 @@ docker compose up --build
    On first run, the Ollama container will pull the required models before the app becomes healthy — this can take a few minutes depending on model size.
 
 4. The API is available at `http://localhost:8000` (Swagger UI at `http://localhost:8000/docs`).
+
+### Using OpenRouter
+
+Set `LLM_PROVIDER=openrouter` and configure:
+
+```dotenv
+OPENROUTER_API_KEY=your_key_here
+OPENROUTER_CLASSIFIER=your_model_id
+OPENROUTER_JUDGE_MODEL=your_model_id
+OPENROUTER_SPECIALIST_MODEL=your_model_id
+OPENROUTER_DEFAULT_MODEL=your_model_id
+```
+
+> **Free-tier models (`:free` suffix) may be used for training by the
+> underlying provider.** Do not send proprietary code, secrets, or sensitive
+> data through `:free` model IDs. Paid OpenRouter model IDs on the same key
+> are not subject to this. See `.env.example` for full provider terms and
+> links (NVIDIA NIM / OpenRouter free-tier data usage notices).
 
 ### Example request
 
@@ -245,7 +310,7 @@ app/
 │   ├── Dockerfile              # standalone image, imports shared app/ modules
 │   └── pyproject.toml           # isolated uv project, pinned dependencies
 ├── memory.py               # ChromaDB read/write
-├── model_factory.py        # provider-agnostic model loading
+├── model_factory.py        # provider-agnostic model loading (Ollama, OpenAI, Groq, OpenRouter)
 └── schemas.py              # request models, GitHub error hierarchy, PR-fetch construction
 docker-compose.yml
 Dockerfile
@@ -258,7 +323,10 @@ Dockerfile
 - [x] Docker containerization
 - [x] GitHub PR API integration — automatic fetching of PR diffs, file contents, and cross-repo imports, replacing manual file copying
 - [x] **MCP server** — `review_pr` and `check_cross_file_taint` exposed as MCP tools, containerized and verified end-to-end via Claude Desktop
-- [ ] Model-aware prompt optimization to reduce token usage by dynamically adjusting prompt complexity based on the selected model, improving efficiency for high-token code review runs.
+- [x] **Token-optimized output formatting** — windowed, merged diff context for the diff-assembly LLM call instead of full-file content
+- [x] **OpenRouter provider support** — added as a fourth LLM provider alongside Ollama, OpenAI, and Groq
+- [x] **Bounded, provider-aware LLM concurrency** — call-level semaphore for Ollama, rate-limit backoff for hosted providers
+- [ ] Model-aware prompt optimization to further reduce token usage by dynamically adjusting prompt complexity based on the selected model
 - [ ] **Frontend** — lightweight UI for submitting a PR link and viewing streamed review output
 - [ ] QLoRA fine-tuning exploration
 
