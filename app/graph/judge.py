@@ -2,12 +2,23 @@ import json
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, SystemMessage
 from ..model_factory import get_model
-from .state import CodeReviewState
+from .state import CodeReviewState, get_input_by_version
 from ..schemas import invoke_with_retry_llm
 import logging
 
 logger = logging.getLogger(__name__)
 
+class Contradiction(BaseModel):
+    line_number: int = Field(description="Source code line where the contradiction occurs.")
+    agents: list[str] = Field(description="Names of the agents whose findings conflict.")
+    reason: str = Field(
+            description=(
+                "Short explanation of the disagreement "
+                "(e.g. severity mismatch, conflicting diagnosis, "
+                "different confidence, incompatible fixes)."
+            )
+        )
+    
 class JudgeOutput(BaseModel):
     coverage: float = Field(ge=0.0, le=1.0, description="How well did agents cover all changed functions and lines")
     accuracy: float = Field(ge=0.0, le=1.0, description="Are the findings factually correct and not false positives")
@@ -15,6 +26,12 @@ class JudgeOutput(BaseModel):
     fix_quality: float = Field(ge=0.0, le=1.0, description="How actionable and correct are the fix suggestions")
     consistency: float = Field(ge=0.0, le=1.0, description="Do agents agree where they overlap, no contradictions")
     agent_feedback: dict[str, list[str]] = Field(description="Agent-specific retry hints. Keys must be agent names from: 'bug', 'security', 'quality', 'performance'. Only include agents that need improvement.")
+    contradictions: list[Contradiction] = Field(
+        description=(
+            "List of contradictory findings identified during the mandatory cross-agent consistency check."
+            "If no contradictory findings are to be identified, return as an empty list"
+        )
+    )
     
 
 JUDGE_PROMPT = """You are a senior code review judge. Your job is to evaluate the quality of findings produced by specialist agents and score them objectively.
@@ -27,8 +44,8 @@ JUDGE_PROMPT = """You are a senior code review judge. Your job is to evaluate th
 - Functions Deleted: {functions_deleted}
 - Agents Invoked: {agents_required}
 
-## Current Version
-{after_content}
+## Diff Content
+{diff_content}
 
 ## Agent Findings (JSON format)
 {findings}
@@ -67,6 +84,28 @@ Score the overall quality of the agent findings across these dimensions:
   - "Quality agent incorrectly flagged valid defensive check as unnecessary"
   - Leave empty if findings are satisfactory
 
+  ## Cross-Check Overlapping Findings (mandatory, before scoring consistency)
+
+Before assigning the `consistency` score:
+
+1. Group all findings by `line_number`.
+2. For every line with findings from two or more agents, compare their
+   reported issue, severity, confidence, and suggested fix.
+3. Classify each overlapping pair as:
+   - Consistent — agents agree or provide complementary information.
+   - Redundant — agents report the same issue without disagreement.
+   - Contradictory — agents disagree about the existence, severity,
+     confidence, or recommended action for the same code location.
+4. For every pair classified as Contradictory, add one entry to the
+   `contradictions` field with the `line_number`, the names of the
+   agents involved, and a one-sentence `reason` describing what they
+   disagree on (e.g. "security rates this critical/0.97, quality rates
+   the same line low/0.6 and calls it non-functional").
+5. Any line with a Contradictory classification must lower the
+   `consistency` score — it cannot be scored 1.0 if `contradictions` is
+   non-empty. If no contradictions are found, `contradictions` must be
+   an empty list and `consistency` may be scored normally.
+
 ## Rules
 - Be objective — score based on evidence in the findings, not assumptions
 - A finding that contradicts clear code intent should penalize accuracy
@@ -85,10 +124,13 @@ Note: Previous version of the code is provided to the agents, you only have acce
 
 judge_agent_llm = get_model(role="judge").with_structured_output(JudgeOutput)
 
-def judge_node(state: CodeReviewState):
+async def judge_node(state: CodeReviewState):
 
     retry_count = state['retry_count'] or 0
+    diff_content = state['diff_view'][0]['diff'] if state['diff_view'] else '' 
     findings = state['final_findings'] or state['findings'] or []
+    findings_str = json.dumps(findings, indent=2, default=str)
+    logger.debug(f"judge prompt sizes — diff_content: {len(diff_content)} chars, findings: {len(findings_str)} chars")
 
     try:
 
@@ -99,15 +141,11 @@ def judge_node(state: CodeReviewState):
             functions_added=state['functions_added'] or [],
             functions_deleted=state['functions_deleted'] or [],
             agents_required=state['agents_required'],
-            after_content=state['input'][-1]['content'],
-            findings= json.dumps(
-                findings,
-                indent=2,
-                default=str
-            )
+            diff_content=diff_content,
+            findings= findings_str
         )
 
-        result = invoke_with_retry_llm(
+        result = await invoke_with_retry_llm(
             llm=judge_agent_llm,
             messages=[
             SystemMessage("You are a senior code review judge. Your job is to evaluate the quality of findings produced by specialist agents and score them objectively and return structured findings."),
@@ -147,7 +185,7 @@ def judge_node(state: CodeReviewState):
     }
 
     except Exception as e:
-        logger.debug(e)
+        logger.warning(f"Judge review failed: {e}")
         return {
             'coverage': 0.0,
             'accuracy': 0.0,

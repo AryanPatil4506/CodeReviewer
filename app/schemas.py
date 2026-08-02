@@ -9,6 +9,8 @@ import time
 import groq
 import re
 import logging
+import asyncio
+from contextlib import nullcontext
 
 logger = logging.getLogger(__name__)
 
@@ -111,43 +113,51 @@ def fetch_with_retry(url: str, headers: dict):
     raise last_error
 
 # Added for Groq API cooldown errors so that the findings don't return empty
-def invoke_with_retry_llm(llm, messages, max_attempts=4):
-    for attempt in range(max_attempts):
-        try:
-            result = llm.invoke(messages)
-            return result
-        except groq.RateLimitError as e:
-            last_error = e
+# Adding Semaphore logic for Ollama based local providers to make sure that hardware constraints are paid attention to 
+# and the LLM requests do not fill up your hardware constraints quickly
 
-            # As sleeping on the final attempt will achieve nothing, the loop is exited and error is raised immediately
-            if attempt == max_attempts - 1:
-                break
+llm_semaphore = asyncio.Semaphore(int(os.getenv("LLM_SEMAPHORE", 3)))
+PROVIDER = os.getenv("LLM_PROVIDER", 'ollama')
 
-            error_time = e.response.headers.get('retry-after', None)
+async def invoke_with_retry_llm(llm, messages, max_attempts=4):
+    ctx = llm_semaphore if PROVIDER == 'ollama' else nullcontext()
+    async with ctx:
+        for attempt in range(max_attempts):
+            try:
+                result = await llm.ainvoke(messages)
+                return result
+            except groq.RateLimitError as e:
+                last_error = e
 
-            if error_time:
-                error_time = float(error_time)
-            else:
-                # No header, parsing the raw error message for wait time
-                message = e.body['error']['message']
-                match = re.search(r"try again in ([\d.]+)(ms|s|m|h)", message)
-                if match:
-                    value = float(match.group(1))
-                    unit = match.group(2)
-                    multiplier = {"ms": 1/1000, "s": 1, "m": 60, "h": 3600}
-                    error_time = value * multiplier.get(unit, 1)
+                # As sleeping on the final attempt will achieve nothing, the loop is exited and error is raised immediately
+                if attempt == max_attempts - 1:
+                    break
 
-                # Failed regex match, waits for a default time of 5s
+                error_time = e.response.headers.get('retry-after', None)
+
+                if error_time:
+                    error_time = float(error_time)
                 else:
-                    error_time = 5
-                    logger.debug("Error time failed to extract")
-                
+                    # No header, parsing the raw error message for wait time
+                    message = e.body['error']['message']
+                    match = re.search(r"try again in ([\d.]+)(ms|s|m|h)", message)
+                    if match:
+                        value = float(match.group(1))
+                        unit = match.group(2)
+                        multiplier = {"ms": 1/1000, "s": 1, "m": 60, "h": 3600}
+                        error_time = value * multiplier.get(unit, 1)
 
-            time.sleep(error_time)
-    
-    # All attempts exhausted thus raise the last real RateLimitError so the
-    # caller's own except Exception block handles the node-specific fallback
-    raise last_error
+                    # Failed regex match, waits for a default time of 5s
+                    else:
+                        error_time = 5
+                        logger.warning("Error, failed to extract wait time, defaulting to 5s")
+                    
+
+                await asyncio.sleep(error_time)
+        
+        # All attempts exhausted thus raise the last real RateLimitError so the
+        # caller's own except Exception block handles the node-specific fallback
+        raise last_error
 
 
 class GitReviewInfo(BaseModel):
@@ -300,7 +310,7 @@ def fetch_pr_files(owner: str, repo: str, pull_number: str) -> tuple[list[FileEn
                     continue
         
         else:
-            logger.debug("No files changed for this commit")
+            logger.warning("No files changed for this commit")
 
         # Returning the Head SHA instead of the Base SHA as Head SHA tracks the latest changes 
         # so we can get the present file structure (tree) from GitHub API

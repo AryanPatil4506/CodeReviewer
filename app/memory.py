@@ -2,6 +2,7 @@ import hashlib
 from .graph.state import CodeReviewState, get_input_by_version, resolve_file_path
 from .embeddings import client, collection
 import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ embedding_fn = collection
 def memory_writer(state: CodeReviewState):
     repo_id = state.get('repo_id') or 'unscoped'
     if repo_id == 'unscoped':
-        logger.debug("memory_writer: no repo_id set — findings filed under shared 'unscoped' bucket")
+        logger.warning("memory_writer: no repo_id set — findings filed under shared 'unscoped' bucket")
 
     collection = client.get_or_create_collection(
         name=collection_name_for_repo(repo_id),
@@ -37,7 +38,7 @@ def memory_writer(state: CodeReviewState):
             metadatas=[{"type": "manifest", "repo_id": repo_id}]
         )
     except Exception as e:
-        logger.debug(f"memory_writer: manifest upsert failed: {e}")
+        logger.warning(f"memory_writer: manifest upsert failed: {e}")
     
     final_findings = state.get('final_findings') or []
     if not final_findings:
@@ -53,15 +54,17 @@ def memory_writer(state: CodeReviewState):
             "severity": finding['severity'],
             "line_number": finding['line_number'],
             "agent": finding['agent'],
+            "timestamp": datetime.now(timezone.utc).isoformat()
         })
 
     try:
         collection.add(ids=ids, documents=documents, metadatas=metadatas)
     except Exception as e:
-        logger.debug(f"memory_writer: failed to write findings for run {state['id']}: {e}")
+        logger.warning(f"memory_writer: failed to write findings for run {state['id']}: {e}")
     
 
 def memory_reader(state: CodeReviewState):
+    LIMIT = 5
     repo_id = state.get('repo_id') or 'unscoped'
 
     new_input = get_input_by_version(state['input'], 'new')
@@ -78,7 +81,7 @@ def memory_reader(state: CodeReviewState):
 
         results = collection.get(where={"file_path": current_file})
     except Exception as e:
-        logger.debug(f"memory_reader: lookup failed: {e}")
+        logger.warning(f"memory_reader: lookup failed: {e}")
         return {'previously_found': None}
     
     documents = results.get('documents', [])
@@ -87,8 +90,18 @@ def memory_reader(state: CodeReviewState):
     if not documents:
         return {'previously_found': None, 'past_findings': []}
     
+    # Sorting to the latest findings using zip and sorted method
+    paired = sorted(
+        zip(documents, metadatas),
+        key= lambda x: x[1].get('timestamp', ''),
+        reverse=True
+    )
+
+    # Unzipping the files seperately again after sorting
+    documents, metadatas = map(list, zip(*paired))
+    
     past_findings: dict[str, list[str]] = {}
-    for doc, meta in zip(documents, metadatas):
+    for doc, meta in zip(documents[:LIMIT], metadatas[:LIMIT]):
         agent = meta.get('agent', 'Unknown')
         past_findings.setdefault(agent, []).append(doc)
     

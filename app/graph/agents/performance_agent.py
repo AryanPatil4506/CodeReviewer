@@ -13,6 +13,7 @@ class PerformanceFinding(BaseModel):
     severity: Literal["critical", "high", "medium", "low"] = Field(description="Impact severity cause by the issue")
     function_name: Optional[str] = Field(default=None, description="Which function contains the issue")
     line_number: int = Field(description="Line number where the issue occurs")
+    category: str = Field(description="Category or type of the identified issue")
     fix_complexity: Literal['Simple', 'Moderate', 'Complex'] = Field(description="How complex is the fix")
     fix_snippet: Optional[str] = Field(default=None, description="Corrected code snippet. REQUIRED for Simple fixes, null for Moderate/Complex")
     @field_validator('fix_snippet')
@@ -41,11 +42,16 @@ PERFORMANCE_AGENT_PROMPT = """You are a specialist performance reviewer. Your jo
 - Functions Added: {functions_added}
 - Functions Deleted: {functions_deleted}
 
-## Previous Version
-{before_content}
+## Diff Content
+{diff_content}
 
-## Current Version
-{after_content}
+Note on line numbers: each diff hunk starts with a header like
+`@@ -old_start,old_count +new_start,new_count @@`. The number after `+`
+is the starting line number of that hunk in the CURRENT version. Count
+forward from there through the hunk's lines (skipping `-` lines, which
+don't exist in the current version) to determine the exact line_number
+for a bug found in that hunk.
+
 
 ## Retry Context (if applicable)
 {retry_hints}
@@ -80,6 +86,7 @@ For each issue found, provide:
 - `fix_snippet`: optimized code snippet if applicable, otherwise null
 - `suggestion`: concrete optimization suggestion
 - `confidence`: confidence this is a real performance issue (0.0 - 1.0)
+- `category`: a concise, standardized category describing the issue. Use the same category for semantically identical issues to enable deduplication and tie-breaking.
 
 ## Rules
 - Compare the current version against the previous version — flag cases where 
@@ -100,12 +107,10 @@ For each issue found, provide:
 
 performance_agent_llm = get_model(role="specialist").with_structured_output(PerformanceAgentOutput)
 
-def performance_agent_node(state: CodeReviewState):
+async def performance_agent_node(state: CodeReviewState):
 
     hints = state['retry_hints'].get('performance', [])
     retry_hints_str = "\n".join(f"- {h}" for h in hints) or "None"
-
-    old_input = get_input_by_version(state['input'], 'old')
     new_input = get_input_by_version(state['input'], 'new')
     file_path = resolve_file_path(new_input) if new_input else "unknown_file"
     past = state.get('past_findings') or {}
@@ -113,19 +118,20 @@ def performance_agent_node(state: CodeReviewState):
 
     try:
 
+        diff_content = state["diff_view"][0]["diff"]
+
         prompt = PERFORMANCE_AGENT_PROMPT.format(
             language=state['language'] or 'Unknown',
             semantic_magnitude=state['semantic_magnitude'],
             functions_modified=state['functions_modified'] or [],
             functions_added=state['functions_added']or [],
             functions_deleted=state['functions_deleted'] or [],
-            before_content=old_input['content'] if old_input else "",
-            after_content=new_input['content'] if new_input else "",
+            diff_content=diff_content,
             retry_hints=retry_hints_str,
             past_findings=past_str
         )
         
-        result = invoke_with_retry_llm(
+        result = await invoke_with_retry_llm(
             llm=performance_agent_llm,
             messages=[
             SystemMessage("You are a specialist performance reviewer. Your job is to identify performance bottlenecks and inefficiencies in a code diff and return structured findings"),
@@ -144,6 +150,7 @@ def performance_agent_node(state: CodeReviewState):
                 fix_snippet=r.fix_snippet,
                 suggestion=r.suggestion,
                 confidence=r.confidence,
+                category=r.category,
                 search_term=None,
                 propagation_chain=None
             )
@@ -153,5 +160,6 @@ def performance_agent_node(state: CodeReviewState):
         return {'findings': findings}
 
     except Exception as e:
-        logger.debug(e)
-        return {'findings': []}
+        logger.warning(f"PERFORMANCE AGENT failed: {e}")
+        file_path = state['diff_view'][0]['file'] if state['diff_view'] else 'unknown'
+        return {"agent_errors": [{"agent": "PERFORMANCE AGENT", "file": file_path, "error": str(e)}], "findings": []}

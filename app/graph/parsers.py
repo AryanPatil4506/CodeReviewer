@@ -22,8 +22,8 @@ EXTENSION_MAP = {
 def detect_language(inputs: list[Input]) -> Optional[str]:
     detected = set()
     for inp in inputs:
-        if inp.get('filename'):
-            ext = Path(inp['filename']).suffix.lower()
+        if inp.get('file'):
+            ext = Path(inp['file']).suffix.lower()
             if ext in EXTENSION_MAP:
                 detected.add(EXTENSION_MAP[ext])
         
@@ -135,24 +135,22 @@ def diff_parser(state: CodeReviewState) -> dict:
 
     old_input = get_input_by_version(inputs, 'old')
     new_input = get_input_by_version(inputs, 'new')
-
-    if new_input is None:
-        # print(f"diff_parser: no 'new' version found among {len(inputs)} input(s) - skipping diff")
-        return {
-            'lines_changed': 0,
-            'percent_changed': 0.0,
-            'structural_type': 'trivial'
-        }
     
-    prev_lines = (old_input['content'] if old_input else '').splitlines()
-    new_lines = new_input['content'].splitlines()
+    file = old_input['file'] if old_input else new_input['file']
 
-    diff = difflib.unified_diff(prev_lines, new_lines, lineterm="")
+    prev_lines = (old_input['content'] if old_input else '').splitlines()
+    new_lines = (new_input['content'] if new_input else '').splitlines()
+
+    
+    # Converting the generator into a list immediately
+    diff_lines = list(difflib.unified_diff(prev_lines, new_lines, lineterm=""))
+
+    diff_text = "\n".join(diff_lines)
 
     lines_added = 0
     lines_removed = 0
 
-    for line in diff:
+    for line in diff_lines:
         if line.startswith(('+++', '---', '@@')):
             continue
         if line.startswith('+'):
@@ -169,7 +167,13 @@ def diff_parser(state: CodeReviewState) -> dict:
         "lines_changed":   lines_changed,
         "percent_changed": percent_changed,
         "structural_type": _classify(percent_changed, lines_changed),
-        'language': detect_language(state['input']) 
+        'language': detect_language(state['input']),
+        'diff_view': [
+            {
+                'file': file,
+                'diff': diff_text,
+            }
+        ]
     }
 
 def ast_parser(state: CodeReviewState):
