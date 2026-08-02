@@ -185,7 +185,7 @@ FILE_SEMAPHORE=5
 
 1. Clone the repo and copy the environment template:
 ```bash
-git clone <repo-url>
+git clone https://github.com/AryanPatil4506/CodeReviewer.git
 cd CodeReviewer
 cp .env.example .env
 ```
