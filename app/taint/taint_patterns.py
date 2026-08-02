@@ -6,6 +6,9 @@ source_patterns = [
     ("request", ["values", "get"], 10),
     ("request", ["headers", "get"], 8),
     ("request", ["cookies", "get"], 8),
+    ("request", ["data"], 9),                    # raw body, no parsing
+    ("request", ["stream"], 8),
+    ("request", ["get_json"], 10),
 
     # Django
     ("request", ["GET", "get"], 10),
@@ -29,10 +32,12 @@ source_patterns = [
     # Environment
     ("os", ["environ", "get"], 4),
     ("os", ["getenv"], 4),
+    ("dotenv", ["load_dotenv"], 3),
 
     # Config files
     ("json", ["load"], 5),
     ("yaml", ["safe_load"], 5),
+    ("configparser", ["read"], 4),
 
     # Deserialization
     ("pickle", ["load"], 8),
@@ -49,6 +54,28 @@ source_patterns = [
     # URL parsing
     ("urllib", ["parse_qs"], 8),
     ("urllib", ["parse_qsl"], 8),
+
+    # Database reads (data that was itself user-supplied upstream)
+    ("cursor", ["fetchone"], 5),
+    ("cursor", ["fetchall"], 5),
+
+    # WebSocket
+    ("websocket", ["recv"], 9),
+
+    # Message queues
+    ("kafka", ["poll"], 7),
+    ("pika", ["basic_consume"], 7),
+
+    # gRPC
+    ("grpc", ["ServicerContext"], 7),
+
+    # Click / argparse (CLI frameworks beyond raw sys.argv)
+    ("argparse", ["parse_args"], 8),
+    ("click", ["argument"], 8),
+    ("click", ["option"], 7),
+
+    # File uploads
+    ("werkzeug", ["FileStorage"], 9),
 ]
 
 sink_patterns = [
@@ -161,6 +188,43 @@ sink_patterns = [
     ("logging", ["info"], 4),
     ("logging", ["warning"], 4),
     ("logging", ["error"], 4),
+
+    # NoSQL injection
+    ("collection", ["find"], 7),
+    ("collection", ["find_one"], 7),
+    ("pymongo", ["MongoClient"], 5),
+
+    # LDAP injection
+    ("ldap3", ["Connection"], 8),
+
+    # Regex DoS (ReDoS) — untrusted pattern, not just untrusted input
+    ("re", ["compile"], 5),
+
+    # Server-side template injection — additional engines
+    ("django", ["Template"], 8),
+    ("string", ["Template"], 5),
+
+    # XXE (XML external entity) — additional parsers
+    ("xml", ["sax"], 8),
+    ("lxml", ["etree"], 8),
+
+    # Insecure deserialization — additional
+    ("jsonpickle", ["decode"], 8),
+    ("dill", ["loads"], 8),
+
+    # Insecure randomness (security-sensitive contexts)
+    ("random", ["random"], 3),
+    ("random", ["randint"], 3),
+
+    # Header injection / response splitting
+    ("response", ["headers"], 6),
+
+    # Format string / f-string with untrusted input as SQL
+    ("execute", ["format"], 7),
+
+    # Environment variable writes (config tampering downstream)
+    ("os", ["putenv"], 5),
+    ("os", ["environ"], 5),
 
     ("print", [], 3),
 ]

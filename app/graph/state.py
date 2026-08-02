@@ -26,6 +26,7 @@ class Finding(TypedDict):
     suggestion: str
     search_term: str | None
     confidence: float
+    category: str
 
 class Input(TypedDict):
     version: Literal['old', 'new']
@@ -33,6 +34,15 @@ class Input(TypedDict):
     file_directory: str
     content: str
     filename: Optional[str]
+
+class DiffEntry(TypedDict):
+    file: str
+    diff: str
+
+class AgentError(TypedDict):
+    agent: str
+    error: str
+    file: str
 
 def get_input_by_version(inputs: list['Input'], version: Literal['old', 'new']) -> Optional['Input']:
     """Find the old or new Input entry by its explicit tag instead of trusting
@@ -79,8 +89,14 @@ class CodeReviewState(TypedDict):
     # Input
     input: Annotated[list[Input], operator.add]
 
+    # Diff
+    diff_view: Annotated[list[DiffEntry],  operator.add]
+
     # Agent router
     agents_required: Optional[list[Literal['bug', 'security', 'quality', 'performance', 'cross_file']]]
+
+    # Agent errors (Failed execution, parsing errors, API errors, etc)
+    agent_errors: Annotated[list[AgentError], operator.add]
 
     # Map production regarding how all the files relate
     system_map: Optional[dict]

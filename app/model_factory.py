@@ -45,6 +45,20 @@ def get_model(role: str = "default"):
             api_key=os.getenv("GROQ_API_KEY"),
             temperature=0
         )
+
+    elif provider == "openrouter":
+        from langchain_openrouter import ChatOpenRouter
+        model_map = {
+                    "classifier": os.getenv("OPENROUTER_CLASSIFIER", "inclusionai/ling-3.0-flash:free"),
+                    "judge": os.getenv("OPENROUTER_JUDGE_MODEL", "inclusionai/ling-3.0-flash:free"),
+                    "specialist": os.getenv("OPENROUTER_SPECIALIST_MODEL", "inclusionai/ling-3.0-flash:free"),
+                    "default": os.getenv("OPENROUTER_DEFAULT_MODEL", "inclusionai/ling-3.0-flash:free"),
+        }
+        return ChatOpenRouter(
+            model=model_map.get(role, model_map['default']),
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            temperature=0
+        )
     
     else:
         raise ValueError(f"Unsupported LLM_PROVIDER: '{provider}'. Choose from: ollama, openai, groq")

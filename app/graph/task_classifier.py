@@ -27,25 +27,25 @@ class TaskClassifier(BaseModel):
     def filter_invalid_agents(cls, v):
         valid = {'bug', 'security', 'quality', 'performance'}
         if v is None:
-            logger.debug("TaskClassifier: agents_required missing, defaulting to ['bug']")
+            logger.warning("TaskClassifier: agents_required missing, defaulting to ['bug']")
             return ['bug']
         
         if isinstance(v, str):
             v = [v]
 
         if not isinstance(v, list):
-            logger.debug(f"TaskClassifier: invalid agents_required type {type(v)}, defaulting to ['bug']")
+            logger.warning(f"TaskClassifier: invalid agents_required type {type(v)}, defaulting to ['bug']")
             return ['bug']
         
         filtered = [a for a in v if a in valid]
 
         if not filtered:
-            logger.debug(f"TaskClassifier: all agents invalid, got {v}, defaulting to ['bug']")
+            logger.warning(f"TaskClassifier: all agents invalid, got {v}, defaulting to ['bug']")
             return ['bug']
         
         if len(filtered) < len(v):
             dropped = [a for a in v if a not in valid]
-            logger.debug(f"TaskClassifier: dropped invalid agents {dropped}")
+            logger.warning(f"TaskClassifier: dropped invalid agents {dropped}")
 
         return filtered
     
@@ -114,10 +114,7 @@ A taint flow is a security signal, not proof of a vulnerability.
 
 task_classifier_llm = get_model(role="classifier").with_structured_output(TaskClassifier)
 
-def task_classifier_node(state: CodeReviewState):
-
-    new_input = get_input_by_version(state['input'], 'new')
-    diff_content = new_input['content'] if new_input else ''
+async def task_classifier_node(state: CodeReviewState):
 
     hints = state['retry_hints'] or {}
 
@@ -131,8 +128,10 @@ def task_classifier_node(state: CodeReviewState):
         f"  - {sc.get('route', 'unknown')} [{sc.get('method', '')}]"
         for sc in state["input_scanner"]
     ) or "None"
-
+    
     try:
+
+        diff_content = state["diff_view"][0]["diff"]
 
         prompt = TASK_CLASSIFIER_PROMPT.format(
             language=state["language"] or "Unknown",
@@ -148,29 +147,13 @@ def task_classifier_node(state: CodeReviewState):
             findings = state['cross_file_findings'] or [],
         )
 
-        result = invoke_with_retry_llm(
+        result = await invoke_with_retry_llm(
             llm=task_classifier_llm,
             messages=[
             SystemMessage("You are a code review classifier. Your job is to analyze a code diff and determine which specialist reviewers are needed."),
             HumanMessage(prompt)
             ]
         )
-
-        """agents = result.agents_required
-
-        if state['input_scanner'] and 'security' not in agents:
-            agents.append('security')
-
-        if state["functions_modified"] and "bug" not in agents:
-            agents.append("bug")
-
-        if state["functions_added"] and "bug" not in agents:
-            agents.append("bug")
-        
-        if state["functions_modified"] and "performance" not in agents:
-            # checking if semantic_magnitude warrants it
-            if result.semantic_magnitude >= 0.4:
-                agents.append("performance")"""
 
         return {
             'semantic_magnitude': result.semantic_magnitude,
@@ -179,7 +162,7 @@ def task_classifier_node(state: CodeReviewState):
         }
     
     except Exception as e:
-        logger.debug(e)
+        logger.warning(f"Task Classification Error: {e}")
         return {
         'semantic_magnitude': 0.8,
         'agents_required': ['bug', 'security', 'quality', 'performance'],

@@ -6,6 +6,7 @@ import uuid
 import asyncio
 import logging
 import sys
+import os
 
 # Logging added to replace the print statements in the files so JSON-RPC odes not get contaminated with the print statements
 logging.basicConfig(
@@ -99,7 +100,7 @@ async def cross_file_loop(
         ctx: Context
 ) -> CrossFileResult:
     counter = [0]
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(int(os.getenv("FILE_SEMAPHORE", 5)))
     total = len(input_dict)
 
     tasks = [
@@ -151,7 +152,6 @@ async def check_cross_file_taint(github_url: str, pull_no: str, ctx: Context) ->
     )
 
     
-
 async def review_loop(
         repo_id: str, 
         input_dict: dict, 
@@ -182,31 +182,6 @@ async def review_loop(
 
     return ReviewResult(findings=successful_reviews, failed_files=failed_files)
 
-"""
-
-    for i, file in enumerate(input_dict):
-        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-        state = await graph.ainvoke({
-            'repo_id': repo_id,
-            'input': [f.model_dump() for f in input_dict[file]],
-            'repo_url_fetch': repo_url,
-            'repo_tree': repo_tree,
-            'head_sha': head_sha
-        }, config = config)
-
-        review.findings.append(
-            FileReview(
-                findings_json=state['output_json'],
-                output_diff=state['output_diff'],
-                output_markdown=state['output_markdown']
-            )
-        )
-
-        await ctx.report_progress(progress= i+1, total=total)
-
-    return review
-
-"""
 
 async def review_single_file(
         file: str,

@@ -13,6 +13,7 @@ class SecurityFinding(BaseModel):
     severity: Literal["critical", "high", "medium", "low"] = Field(description="Impact severity of the vulnerability")
     function_name: Optional[str] = Field(default=None, description="Which function contains the vulnerability")
     line_number: int = Field(description="Line number where the vulnerability occurs")
+    category: str = Field(description="Security vulnerability category of the finding")
     fix_complexity: Literal['Simple', 'Moderate', 'Complex'] = Field(description="How complex is the fix")
     fix_snippet: Optional[str] = Field(default=None, description="Corrected code snippet. REQUIRED for Simple fixes, null for Moderate/Complex")
     @field_validator('fix_snippet')
@@ -67,11 +68,15 @@ Use these findings as additional context while reviewing the code.
 Prioritize investigation of any modified code that participates in a reported source→sink flow.
 Verify whether the flow is actually exploitable by examining validation, sanitization, parameterization, escaping, authorization checks, or other mitigations present in the current code before reporting a vulnerability.
 
-## Previous Version
-{before_content}
+## Diff Content
+{diff_content}
 
-## Current Version
-{after_content}
+Note on line numbers: each diff hunk starts with a header like
+`@@ -old_start,old_count +new_start,new_count @@`. The number after `+`
+is the starting line number of that hunk in the CURRENT version. Count
+forward from there through the hunk's lines (skipping `-` lines, which
+don't exist in the current version) to determine the exact line_number
+for a bug found in that hunk.
 
 ## Retry Context (if applicable)
 {retry_hints}
@@ -107,6 +112,7 @@ For each vulnerability found, provide:
 - `fix_snippet`: corrected code snippet if applicable, otherwise null
 - `suggestion`: concrete remediation steps
 - `confidence`: confidence this is a real vulnerability (0.0 - 1.0)
+- `category`: a concise, standardized category describing the issue. Use the same category for semantically identical issues to enable deduplication and tie-breaking.
 
 ## Rules
 - If entry points are present, always scrutinize input handling
@@ -122,18 +128,18 @@ For each vulnerability found, provide:
 
 security_agent_llm = get_model(role="specialist").with_structured_output(SecurityAgentOutput)
 
-def security_agent_node(state: CodeReviewState):
+async def security_agent_node(state: CodeReviewState):
 
     hints = state['retry_hints'].get('security', [])
     retry_hints_str = "\n".join(f"- {h}" for h in hints) or "None"
-
-    old_input = get_input_by_version(state['input'], 'old')
     new_input = get_input_by_version(state['input'], 'new')
     file_path = resolve_file_path(new_input) if new_input else "unknown_file"
     past = state.get('past_findings') or {}
     past_str = "\n\n".join(past.get('Security', [])) or None
 
     try:
+
+        diff_content = state["diff_view"][0]["diff"]
 
         prompt = SECURITY_AGENT_PROMPT.format(
             language=state['language'] or 'Unknown',
@@ -143,13 +149,12 @@ def security_agent_node(state: CodeReviewState):
             functions_added=state['functions_added']or [],
             functions_deleted=state['functions_deleted'] or [],
             findings = state['cross_file_findings'] or [],
-            before_content=old_input['content'] if old_input else "",
-            after_content=new_input['content'] if new_input else "",
+            diff_content = diff_content,
             retry_hints=retry_hints_str,
             past_findings=past_str
         )
 
-        result = invoke_with_retry_llm(
+        result = await invoke_with_retry_llm(
             llm=security_agent_llm,
             messages=[
             SystemMessage("You are a specialist security reviewer. Your job is to identify security vulnerabilities in a code diff and return structured findings."),
@@ -168,6 +173,7 @@ def security_agent_node(state: CodeReviewState):
                 fix_snippet=r.fix_snippet,
                 suggestion=r.suggestion,
                 confidence=r.confidence,
+                category=r.category,
                 search_term=None,
                 propagation_chain=None
             )
@@ -177,5 +183,6 @@ def security_agent_node(state: CodeReviewState):
         return {'findings': findings}
     
     except Exception as e:
-        logger.debug(e)
-        return {'findings': []}
+        logger.warning(f"SECURITY AGENT failed: {e}")
+        file_path = state['diff_view'][0]['file'] if state['diff_view'] else 'unknown'
+        return {"agent_errors": [{"agent": "SECURITY AGENT", "file": file_path, "error": str(e)}], "findings": []}
