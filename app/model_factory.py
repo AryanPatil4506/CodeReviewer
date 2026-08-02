@@ -61,4 +61,4 @@ def get_model(role: str = "default"):
         )
     
     else:
-        raise ValueError(f"Unsupported LLM_PROVIDER: '{provider}'. Choose from: ollama, openai, groq")
+        raise ValueError(f"Unsupported LLM_PROVIDER: '{provider}'. Choose from: ollama, openai, groq, openrouter")
