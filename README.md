@@ -296,6 +296,150 @@ Add the following to your Claude Desktop config (typically at
 Restart Claude Desktop after saving. The `review_pr` and `check_cross_file_taint`
 tools will then be available directly in conversation.
 
+## Graph Visualizer
+
+Watch a PR review run through your real LangGraph pipeline, node by node,
+live: `start → diff_parser → ast_parser → memory_reader → cross-taint →
+task_classifier → agent_dispatcher → [bug/security/quality/performance
+agents, Send()-routed] → aggregator → judge_agent → output_formatter →
+memory_writer`.
+
+This is not a demo. The backend calls your actual compiled graph via
+`graph.astream(..., stream_mode="updates")` — no simulated timings, no
+fake output. What you see is what the graph actually did.
+
+---
+
+
+### 1. Run it locally (no Docker) — do this first
+
+```bash
+cd CodeReviewer
+pip install -r requirements.txt                    # your existing deps
+pip install -r visualizer/backend/requirements.txt  # the small delta: sqlalchemy, aiosqlite, websockets
+
+cd visualizer/backend
+uvicorn viz_app.main:app --reload --port 8001
+```
+
+In a second terminal:
+
+```bash
+cd CodeReviewer/visualizer/frontend
+npm install
+npm run dev       # opens on http://localhost:5173, proxies API calls to :8001
+```
+
+Open `http://localhost:5173`, type in a GitHub PR URL and a PR number, hit
+**Start Execution**, and watch it run.
+
+**Env vars it needs** (same ones your MCP server / FastAPI app already
+use — nothing new): `GITHUB_TOKEN` and whichever LLM provider vars your
+`model_factory.py` reads (Ollama running locally, or `GROQ_API_KEY` /
+`OPENAI_API_KEY` / etc.), plus ChromaDB pointed at the same path your main
+app uses if you want memory-reader context to show up as non-empty.
+
+A PR can touch multiple files. **Start Execution** reviews just the first
+file — good for a quick look at one graph run. **All Files**, next to it,
+queues every changed file and runs them one after another (this is what
+was missing before: previously only one file ever ran, and LangSmith only
+ever showed one trace, because the engine picked exactly one file and
+stopped there). Each file's run is live-viewable via the History drawer,
+now labeled by filename instead of a bare UUID.
+
+---
+
+### 2. Run it with Docker
+
+Merge the two services in `visualizer/docker-compose.snippet.yml` into
+your **existing** `CodeReviewer/docker-compose.yml` (don't replace your
+file — the snippet reuses your `ollama` service and `chroma_data` volume).
+Also add `visualizer_data:` to your top-level `volumes:` block.
+
+Then, from the repo root:
+
+```bash
+docker compose up --build visualizer-backend visualizer-frontend
+```
+
+- Backend: `http://localhost:8001`
+- Frontend: `http://localhost:3000`
+
+Your existing `app` service keeps port `8000` — no conflict.
+
+---
+
+### 3. API, if you want to drive it without the UI
+
+```bash
+# Start a run for one file (the first file in the diff, by default)
+curl -X POST http://localhost:8001/api/executions \
+  -H "Content-Type: application/json" \
+  -d '{"github_url": "https://github.com/AryanPatil4506/CodeReviewer", "pull_no": "1", "file": "handler_sink.py"}'
+# -> {"run_id": "...", "status": "pending", ...}
+
+# Review EVERY changed file in the PR (queues one run per file, run
+# sequentially on the backend - not concurrently, see the docstring on
+# execution_engine.py::start_pr_review for why)
+curl -X POST http://localhost:8001/api/executions/pr \
+  -H "Content-Type: application/json" \
+  -d '{"github_url": "https://github.com/AryanPatil4506/CodeReviewer", "pull_no": "1"}'
+# -> {"runs": [{"run_id": "...", "file": "handler_sink.py"}, {"run_id": "...", "file": "helper_source.py"}, ...]}
+
+# Poll it
+curl http://localhost:8001/api/executions/<run_id>
+
+# Or list everything (History drawer uses this - each entry now has a
+# `label` like "owner/repo - path/to/file.py" instead of a bare UUID)
+curl http://localhost:8001/api/executions
+
+# Or stream it live
+wscat -c ws://localhost:8001/ws/executions/<run_id>
+
+# Pause / resume / cancel
+curl -X POST http://localhost:8001/api/executions/<run_id>/pause
+curl -X POST http://localhost:8001/api/executions/<run_id>/resume
+curl -X POST http://localhost:8001/api/executions/<run_id>/cancel
+
+# Static graph metadata (nodes/edges, for the canvas layout)
+curl http://localhost:8001/api/graph
+```
+
+---
+
+### 4. What each node status means on the canvas
+
+| Status | Meaning |
+|---|---|
+| `pending` | Hasn't run yet |
+| `running` | LangGraph is currently executing it |
+| `completed` | Ran, no `agent_errors` in its state delta |
+| `failed` | Ran, but returned `agent_errors` (matches `bug_agent.py`'s real error shape: `{agent, file, error}`) |
+| `skipped` | **New status added for this integration.** `agent_dispatcher` didn't `Send()` to this node on this particular run — expected for 3 of the 4 specialist agents on most PRs, since `task_classifier` usually only routes to 1–2 |
+
+If the whole run fails before the graph even starts (bad PR URL, GitHub
+rate limit, etc.), every node is marked `failed` rather than sitting at
+`pending` forever — this was a real bug in an earlier pass, since fixed
+and covered by a test.
+
+---
+
+
+### 5. If you change your graph later
+
+Two files are the only ones coupled to your graph's specific shape:
+
+- `visualizer/backend/viz_app/graph_definition.py` — the static node/edge
+  list used purely for canvas layout. Add/remove/rename a node here if you
+  add/remove/rename one in `graph_builder.py`.
+- `visualizer/backend/viz_app/execution_engine.py` — the `_run` method's
+  `inputs = {...}` dict must match whatever keys your graph's entry state
+  actually expects (currently: `repo_id`, `input`, `repo_url_fetch`,
+  `repo_tree`, `head_sha`, matching `construct_review_req`'s output).
+
+Everything else (scheduler, WebSocket broadcast, DB persistence, the React
+canvas) is graph-shape-agnostic and shouldn't need touching.
+
 ## Project Structure
 
 ```
@@ -311,7 +455,8 @@ app/
 │   └── pyproject.toml           # isolated uv project, pinned dependencies
 ├── memory.py               # ChromaDB read/write
 ├── model_factory.py        # provider-agnostic model loading (Ollama, OpenAI, Groq, OpenRouter)
-└── schemas.py              # request models, GitHub error hierarchy, PR-fetch construction
+├── schemas.py              # request models, GitHub error hierarchy, PR-fetch construction
+└── visualizer/             # live LangGraph execution visualizer (FastAPI + React)
 docker-compose.yml
 Dockerfile
 ```
@@ -326,8 +471,8 @@ Dockerfile
 - [x] **Token-optimized output formatting** — windowed, merged diff context for the diff-assembly LLM call instead of full-file content
 - [x] **OpenRouter provider support** — added as a fourth LLM provider alongside Ollama, OpenAI, and Groq
 - [x] **Bounded, provider-aware LLM concurrency** — call-level semaphore for Ollama, rate-limit backoff for hosted providers
+- [x] **Frontend** — lightweight UI for submitting a PR link and viewing streamed review output
 - [ ] Model-aware prompt optimization to further reduce token usage by dynamically adjusting prompt complexity based on the selected model
-- [ ] **Frontend** — lightweight UI for submitting a PR link and viewing streamed review output
 - [ ] QLoRA fine-tuning exploration
 
 The frontend is actively in progress.
