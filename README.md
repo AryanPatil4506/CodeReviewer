@@ -475,8 +475,6 @@ Dockerfile
 - [ ] Model-aware prompt optimization to further reduce token usage by dynamically adjusting prompt complexity based on the selected model
 - [ ] QLoRA fine-tuning exploration
 
-The frontend is actively in progress.
-
 ## License
 
 MIT
