@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-void-950 text-slate-100 font-body antialiased;
+  }
+  * {
+    @apply border-void-600;
+  }
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-white/[0.04] backdrop-blur-xl border border-white/[0.08];
+  }
+  .glass-strong {
+    @apply bg-void-800/80 backdrop-blur-2xl border border-white/[0.08];
+  }
+  .text-glow-signal {
+    text-shadow: 0 0 12px rgba(34, 211, 238, 0.5);
+  }
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.25) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.25);
+    border-radius: 999px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* ---- React Flow theme overrides: fold it into the void/glass palette ---- */
+.react-flow {
+  --xy-background-color: transparent;
+  --xy-edge-stroke-default: rgba(148, 163, 184, 0.35);
+  --xy-edge-stroke-width-default: 1.5;
+  --xy-controls-button-background-color: rgba(16, 20, 31, 0.85);
+  --xy-controls-button-background-color-hover: rgba(30, 36, 54, 0.95);
+  --xy-controls-button-color: #cbd5e1;
+  --xy-controls-button-color-hover: #67e8f9;
+  --xy-controls-button-border-color: rgba(255, 255, 255, 0.08);
+  --xy-minimap-background-color: rgba(11, 14, 20, 0.9);
+}
+.react-flow__attribution {
+  @apply !bg-transparent !text-slate-600 text-[10px];
+}
+.react-flow__controls {
+  @apply !shadow-none overflow-hidden rounded-lg border border-white/[0.08];
+}
+.react-flow__controls-button {
+  @apply !border-white/[0.06];
+}
+.react-flow__minimap {
+  @apply !rounded-lg overflow-hidden border border-white/[0.08];
+}

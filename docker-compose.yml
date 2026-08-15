@@ -1,6 +1,7 @@
 volumes:
     chroma_data:
     ollama_data:
+    visualizer_data:
 services:
   app:
     build: .
@@ -61,3 +62,29 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
+
+  visualizer-backend:
+    build:
+      context: .                                    # repo root, not visualizer/backend
+      dockerfile: visualizer/backend/Dockerfile
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env                                          # reuses GITHUB_TOKEN, LLM_PROVIDER, etc.
+    environment:
+      - CHROMA_DB_PATH=/app/chroma
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000,http://localhost
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - chroma_data:/app/chroma                        # SAME volume as `app`/`mcp-server` - shared memory
+      - visualizer_data:/repo/visualizer/backend/data   # its own execution-history sqlite db
+
+  visualizer-frontend:
+    build: ./visualizer/frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - visualizer-backend

@@ -126,7 +126,7 @@ For each vulnerability found, provide:
 - If a function has been modified, you MUST provide at least one finding or explicitly justify why no issues exist
 """
 
-security_agent_llm = get_model(role="specialist").with_structured_output(SecurityAgentOutput)
+security_agent_llm = get_model(role="specialist").with_structured_output(SecurityAgentOutput, method="json_schema")
 
 async def security_agent_node(state: CodeReviewState):
 
