@@ -105,7 +105,7 @@ For each issue found, provide:
 - Only flag genuine performance bottlenecks — complexity, memory, I/O, caching, loops
 """
 
-performance_agent_llm = get_model(role="specialist").with_structured_output(PerformanceAgentOutput)
+performance_agent_llm = get_model(role="specialist").with_structured_output(PerformanceAgentOutput, method="json_schema")
 
 async def performance_agent_node(state: CodeReviewState):
 

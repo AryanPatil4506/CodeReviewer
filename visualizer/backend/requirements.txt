@@ -1,0 +1,8 @@
+# Install these INTO the same virtualenv as CodeReviewer itself, not a
+# separate one - execution_engine.py does `from app.graph.graph_builder
+# import graph`, so it needs langgraph/chromadb/etc. from that project on
+# the same Python path.
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+python-multipart==0.0.20
+websockets==14.1
